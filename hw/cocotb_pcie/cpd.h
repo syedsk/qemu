@@ -23,6 +23,13 @@
 #include "exec/memory.h"
 #include "qapi/error.h"
 
+#define CPD_MAX_BARS 6
+
+enum {
+    CPD_BAR_TYPE_MEM32 = 0,
+    CPD_BAR_TYPE_MEM64 = 1,
+    CPD_BAR_TYPE_IO    = 2,
+};
 typedef struct cocotb_pcie_ctrl_s {
     PCIDevice   parent_obj;
     MemoryRegion bar0;
@@ -30,6 +37,13 @@ typedef struct cocotb_pcie_ctrl_s {
     MemoryRegion msix_exclusive_bar;
     MemoryRegion msix_table_mmio;
     MemoryRegion msix_pba_mmio;
+
+    /* Per-BAR memory regions and config */
+    MemoryRegion bar_mr[CPD_MAX_BARS];
+    uint64_t     bar_size[CPD_MAX_BARS];
+    uint8_t      bar_type[CPD_MAX_BARS];
+    bool         bar_prefetch[CPD_MAX_BARS];
+    bool         bar_present[CPD_MAX_BARS];
 
     /* Cosim stuff */
     void *zmq_context;

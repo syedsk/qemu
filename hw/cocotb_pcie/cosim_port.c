@@ -532,8 +532,9 @@ uint64_t cosim_mmio_read(CpdCtrl *cpd, uint64_t addr, unsigned size)
 #endif
     /* Parse completion and extract data */
     uint64_t result = parse_completion_tlp(response_buffer, rc, tag, (addr & 0x3), size);
-    
+#ifdef DEBUG
     printf("%s addr: %llx, size: %d result: %lx\n", __func__, (unsigned long long)addr, size, result);
+#endif
     return result;
 }
 

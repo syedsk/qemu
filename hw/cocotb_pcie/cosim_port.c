@@ -26,7 +26,7 @@
 #include "qapi/error.h"
 #include "hw/pci/pci.h"
 #include "qemu/log.h"
-#include "cpd.h"
+#include "cosim_port.h"
 
 /* TLP Format and Type definitions */
 #define PCIE_FMT_3DW_NO_DATA    0x0  /* 3DW header, no data */
@@ -34,9 +34,9 @@
 #define PCIE_FMT_3DW_WITH_DATA  0x2  /* 3DW header, with data */
 #define PCIE_FMT_4DW_WITH_DATA  0x3  /* 4DW header, with data */
 
-#define PCIE_TYPE_MRD			0x00  /* Memory Read */
-#define PCIE_TYPE_MRDLK			0x01  /* Memory Read Lock */
-#define PCIE_TYPE_MWR	        0x00  /* Memory Write (with data) */
+#define PCIE_TYPE_MRD           0x00  /* Memory Read */
+#define PCIE_TYPE_MRDLK         0x01  /* Memory Read Lock */
+#define PCIE_TYPE_MWR           0x00  /* Memory Write (with data) */
 #define PCIE_TYPE_CFG_READ_0    0x04 /* Configuration Read Type 0 */
 #define PCIE_TYPE_CFG_WRITE_0   0x04 /* Configuration Write Type 0 */
 #define PCIE_TYPE_CFG_READ_1    0x05 /* Configuration Read Type 1 */
@@ -79,96 +79,105 @@ typedef struct __attribute__((packed)) {
     uint8_t tc_attr_th;      /* TC, Attr, TH */
     uint16_t length;         /* Length in DWords */
     uint16_t completer_id;
-	uint16_t cs_byte_cnt;
+    uint16_t cs_byte_cnt;
     uint16_t requester_id;
-	uint8_t tag;
-	uint8_t lower_addr;
+    uint8_t tag;
+    uint8_t lower_addr;
 } PCIeTLPCpl;
 
 static void handle_posted_ops(void *opaque);
 
-int cpd_connect_cocotb_endpoint(CpdCtrl *cpd, Error **errp) 
+int cosim_port_connect(CosimPort *port, Error **errp) 
 {
-	char endpoint[256];
-	int rc;
-	int zmq_pull_fd;
+    char endpoint[256];
+    int rc;
+    int zmq_pull_fd;
 
-	cpd->zmq_context = zmq_ctx_new();
-	if (!cpd->zmq_context) {
+    port->zmq_context = zmq_ctx_new();
+    if (!port->zmq_context) {
         error_setg(errp, "Failed to create ZMQ context");
         return -1;
-	}
+    }
 
-	/* for non-posted operations
-	 */
-	cpd->np_socket = zmq_socket(cpd->zmq_context, ZMQ_REQ);
-	if (!cpd->np_socket) {
+    /* for non-posted operations
+     */
+    port->np_socket = zmq_socket(port->zmq_context, ZMQ_REQ);
+    if (!port->np_socket) {
         error_setg(errp, "Failed to create ZMQ NP socket");
-		goto err_np;
-	}
+        goto err_np;
+    }
 
-	/* for outgoing posted operations
-	 */
-	cpd->push_socket = zmq_socket(cpd->zmq_context, ZMQ_PUSH);
-	if (!cpd->push_socket) {
+    /* for outgoing posted operations
+     */
+    port->push_socket = zmq_socket(port->zmq_context, ZMQ_PUSH);
+    if (!port->push_socket) {
         error_setg(errp, "Failed to create ZMQ push socket");
-		goto err_push;
-	}
+        goto err_push;
+    }
 
-	/* for incoming posted operations
-	 */
-	cpd->pull_socket = zmq_socket(cpd->zmq_context, ZMQ_PULL);
-	if (!cpd->pull_socket) {
+    /* for incoming posted operations
+     */
+    port->pull_socket = zmq_socket(port->zmq_context, ZMQ_PULL);
+    if (!port->pull_socket) {
         error_setg(errp, "Failed to create ZMQ pull socket");
-		goto err_pull;
-	}
+        goto err_pull;
+    }
 
-	snprintf(endpoint, sizeof(endpoint), "tcp://localhost:%d", cpd->np_port);
-	rc = zmq_connect(cpd->np_socket, endpoint);
-	if (rc != 0) {
+    snprintf(endpoint, sizeof(endpoint), "tcp://localhost:%d", port->np_port);
+    rc = zmq_connect(port->np_socket, endpoint);
+    if (rc != 0) {
         error_setg(errp, "Failed to connect ZMQ NP socket %s: %s",
                    endpoint, zmq_strerror(errno));
-		goto err_conn;
-	}
+        goto err_conn;
+    }
 
-	snprintf(endpoint, sizeof(endpoint), "tcp://localhost:%d", cpd->push_port);
-	rc = zmq_connect(cpd->push_socket, endpoint);
-	if (rc != 0) {
+    snprintf(endpoint, sizeof(endpoint), "tcp://localhost:%d", port->push_port);
+    rc = zmq_connect(port->push_socket, endpoint);
+    if (rc != 0) {
         error_setg(errp, "Failed to connect ZMQ push socket %s: %s",
                    endpoint, zmq_strerror(errno));
-		goto err_conn;
-	}
+        goto err_conn;
+    }
 
-	snprintf(endpoint, sizeof(endpoint), "tcp://localhost:%d", cpd->pull_port);
-	rc = zmq_connect(cpd->pull_socket, endpoint);
-	if (rc != 0) {
+    snprintf(endpoint, sizeof(endpoint), "tcp://localhost:%d", port->pull_port);
+    rc = zmq_connect(port->pull_socket, endpoint);
+    if (rc != 0) {
         error_setg(errp, "Failed to bind to ZMQ pull socket %s: %s",
                    endpoint, zmq_strerror(errno));
-		goto err_conn;
-	}
+        goto err_conn;
+    }
 
     size_t opt_len = sizeof(int);
-	rc = zmq_getsockopt(cpd->pull_socket, ZMQ_FD, &zmq_pull_fd, &opt_len);
-	if (rc != 0) {
+    rc = zmq_getsockopt(port->pull_socket, ZMQ_FD, &zmq_pull_fd, &opt_len);
+    if (rc != 0) {
         error_setg(errp, "Failed to set sockopt on pull socket %s: %s",
                    endpoint, zmq_strerror(errno));
-		goto err_conn;
-	}
-	
-	qemu_set_fd_handler(zmq_pull_fd, handle_posted_ops, NULL, cpd);
+        goto err_conn;
+    }
+    
+    qemu_set_fd_handler(zmq_pull_fd, handle_posted_ops, NULL, port);
 
-	return 0;
+    return 0;
 
 err_conn:
-	zmq_close(cpd->pull_socket);
+    zmq_close(port->pull_socket);
 err_pull:
-    zmq_close(cpd->push_socket);
+    zmq_close(port->push_socket);
 err_push:
-    zmq_close(cpd->np_socket);
+    zmq_close(port->np_socket);
 err_np:
-    zmq_ctx_destroy(cpd->zmq_context);
-	return -1;
+    zmq_ctx_destroy(port->zmq_context);
+    return -1;
 }
+
+void cosim_port_disconnect(CosimPort *p)
+{
+    if (p->pull_socket)  zmq_close(p->pull_socket);
+    if (p->push_socket)  zmq_close(p->push_socket);
+    if (p->np_socket)    zmq_close(p->np_socket);
+    if (p->zmq_context)  zmq_ctx_destroy(p->zmq_context);
+}
+
 
 static void calculate_byte_enables(uint32_t addr, unsigned size,
                                    uint8_t *first_dw_be, uint8_t *last_dw_be)
@@ -199,8 +208,8 @@ static void calculate_byte_enables(uint32_t addr, unsigned size,
 
 static size_t generate_config_read_tlp(uint8_t *buffer, size_t buffer_size,
                                        uint16_t requester_id, uint8_t tag,
-									   uint16_t bdf,
-                                       uint16_t reg, unsigned size)
+                                       uint16_t bdf, uint16_t reg, 
+                                       unsigned size, bool type1)
 {
     if (buffer_size < 12) {  /* 3DW = 12 bytes */
         return 0;
@@ -210,13 +219,14 @@ static size_t generate_config_read_tlp(uint8_t *buffer, size_t buffer_size,
     calculate_byte_enables(reg, size, &first_dw_be, &last_dw_be);
     
 #ifdef DEBUG
-	printf("generate_config_read_tlp: first_be: %x last_be: %x\n", first_dw_be, last_dw_be);
+    printf("generate_config_read_tlp: first_be: %x last_be: %x\n", first_dw_be, last_dw_be);
 #endif
 
     uint32_t length = 1;
     
+    uint8_t cfg_type = type1 ? PCIE_TYPE_CFG_READ_1 : PCIE_TYPE_CFG_READ_0;
     /* DW0: Format (3 bits) + Type (5 bits) + T9 + Attr + Length */
-    buffer[0] = (PCIE_FMT_3DW_NO_DATA << 5) | PCIE_TYPE_CFG_READ_0;
+    buffer[0] = (PCIE_FMT_3DW_NO_DATA << 5) | PCIE_TYPE_CFG_READ_0 | cfg_type;
     buffer[1] = 0x00;  /* T9 = 0 (TC=0), Attr = 0 */
     buffer[2] = (length >> 8) & 0x03;  /* Length high bits */
     buffer[3] = length & 0xFF;         /* Length low bits */
@@ -239,8 +249,9 @@ static size_t generate_config_read_tlp(uint8_t *buffer, size_t buffer_size,
 
 static size_t generate_config_write_tlp(uint8_t *buffer, size_t buffer_size,
                                         uint16_t requester_id, uint8_t tag,
-										uint16_t bdf,
-                                        uint16_t reg, uint32_t val, unsigned size)
+                                        uint16_t bdf,
+                                        uint16_t reg, uint32_t val, unsigned size,
+                                        bool type1)
 {
     uint8_t first_dw_be, last_dw_be;
     calculate_byte_enables(reg, size, &first_dw_be, &last_dw_be);
@@ -253,8 +264,10 @@ static size_t generate_config_write_tlp(uint8_t *buffer, size_t buffer_size,
         return 0;
     }
     
+    uint8_t cfg_type = type1 ? PCIE_TYPE_CFG_WRITE_1 : PCIE_TYPE_CFG_WRITE_0;
+
     /* DW0: Format (3 bits) + Type (5 bits) + T9 + Attr + Length */
-    buffer[0] = (PCIE_FMT_3DW_WITH_DATA << 5) | PCIE_TYPE_CFG_WRITE_0;
+    buffer[0] = (PCIE_FMT_3DW_WITH_DATA << 5) | PCIE_TYPE_CFG_WRITE_0 | cfg_type;
     buffer[1] = 0x00;  /* T9 = 0 (TC=0), Attr = 0 */
     buffer[2] = (length >> 8) & 0x03;  /* Length high bits */
     buffer[3] = length & 0xFF;         /* Length low bits */
@@ -286,26 +299,28 @@ static size_t generate_config_write_tlp(uint8_t *buffer, size_t buffer_size,
 static uint64_t parse_completion_tlp(const uint8_t *buffer, size_t buffer_size,
                                      uint8_t expected_tag, uint8_t byte_offset, unsigned size)
 {
-	PCIeTLPCpl *cpl = (PCIeTLPCpl *)buffer;
+    PCIeTLPCpl *cpl = (PCIeTLPCpl *)buffer;
 
     if (buffer_size < 12) {  /* Minimum 3DW header */
         return 0;
     }
 
-	if ((cpl->fmt_type & 0x1f) != PCIE_TYPE_CPL_D) {
+    if ((cpl->fmt_type & 0x1f) != PCIE_TYPE_CPL_D) {
         fprintf(stderr, "%s: Not a completion with data\n", __func__);
-        return 0;  
-	}
-
-	if (cpl->tag != expected_tag) {
-        fprintf(stderr, "%s: Tag mismatch\n", __func__);
-        return 0;  
+        return 0;
     }
 
-	uint8_t cs = (cpl->cs_byte_cnt >> 5) & 0x7;
-    if (cs != 0) {  
-        fprintf(stderr, "%s: Comletion error status:%x \n", __func__, cs);
-        return 0;  
+    if (cpl->tag != expected_tag) {
+        fprintf(stderr, "%s: Tag mismatch\n", __func__);
+        return 0;
+    }
+
+    uint8_t cs = (cpl->cs_byte_cnt >> 5) & 0x7;
+    if (cs != 0) {
+        #ifdef DEBUG
+        fprintf(stderr, "%s: Completion error status:%x \n", __func__, cs);
+        #endif
+        return 0xFFFFFFFF;
     }
 
     /* Extract data from payload (DW3+) */
@@ -316,7 +331,7 @@ static uint64_t parse_completion_tlp(const uint8_t *buffer, size_t buffer_size,
             result |= ((uint64_t)data_ptr[i]) << (i * 8);
     }
 
-	return result;
+    return result;
 }
 
 #if 0
@@ -352,9 +367,9 @@ static uint64_t parse_completion_tlp(const uint8_t *buffer, size_t buffer_size,
     
     /* Extract lower address to determine byte offset */
     uint8_t lower_addr = buffer[11] & 0x7F;
-	uint8_t byte_offset = lower_addr & 0x3;
+    uint8_t byte_offset = lower_addr & 0x3;
 
-	printf("parse_completion_tlp: lower_address: %x\n", lower_addr);
+    printf("parse_completion_tlp: lower_address: %x\n", lower_addr);
     
     /* Extract data from payload (DW3+) */
     uint64_t result = 0;
@@ -368,21 +383,22 @@ static uint64_t parse_completion_tlp(const uint8_t *buffer, size_t buffer_size,
 }
 #endif
 
-uint32_t cosim_config_read(CpdCtrl *cpd, uint16_t bdf, uint32_t addr, int size)
+uint32_t cosim_config_read(CosimPort *port, uint16_t bdf, uint32_t addr,
+                           int size, bool type1)
 {
     uint8_t tlp_buffer[256];
     uint8_t response_buf[256];
     
     /* Get a unique tag for this transaction */
-    uint8_t tag = cpd->next_tag++;
+    uint8_t tag = port->next_tag++;
     
     /* Generate Configuration Read TLP */
     size_t tlp_size = generate_config_read_tlp(
         tlp_buffer, sizeof(tlp_buffer),
         0, tag,
-		bdf,
-        addr, size
-    );
+        bdf,
+        addr, size, type1);
+    
     
     if (tlp_size == 0) {
         fprintf(stderr, "Failed to generate Config Read TLP\n");
@@ -390,62 +406,63 @@ uint32_t cosim_config_read(CpdCtrl *cpd, uint16_t bdf, uint32_t addr, int size)
     }
     
 #ifdef DEBUG
-	{
-		printf("config read request dump\n");
-		for (int i = 0; i < tlp_size; i++)
-			printf(" %x", tlp_buffer[i]);
-		printf("\n");
-	}
+    {
+        printf("config read request dump\n");
+        for (int i = 0; i < tlp_size; i++)
+            printf(" %x", tlp_buffer[i]);
+        printf("\n");
+    }
 #endif
     /* Send TLP over ZMQ socket */
-    int rc = zmq_send(cpd->np_socket, tlp_buffer, tlp_size, 0);
+    int rc = zmq_send(port->np_socket, tlp_buffer, tlp_size, 0);
     if (rc < 0) {
         fprintf(stderr, "ZMQ send failed: %s\n", zmq_strerror(errno));
         return 0xFFFFFFFF;
     }
 
     /* Receive Completion TLP */
-    rc = zmq_recv(cpd->np_socket, response_buf, sizeof(response_buf), 0);
+    rc = zmq_recv(port->np_socket, response_buf, sizeof(response_buf), 0);
     if (rc < 0) {
         fprintf(stderr, "ZMQ recv failed: %s\n", zmq_strerror(errno));
         return 0xFFFFFFFF;
     }
     
 #ifdef DEBUG
-	{
-		printf("config read completion dump\n");
-		for (int i = 0; i < rc; i++)
-			printf(" %x", response_buf[i]);
-		printf("\n");
-	}
+    {
+        printf("config read completion dump\n");
+        for (int i = 0; i < rc; i++)
+            printf(" %x", response_buf[i]);
+        printf("\n");
+    }
 #endif
 
     /* Parse completion and extract data */
     uint32_t result = parse_completion_tlp(response_buf, rc, tag, (addr & 3), size);
     
 #ifdef DEBUG
-	printf("%s: addr: %x val: %x\n", __func__, addr, result);
+    printf("%s: addr: %x val: %x\n", __func__, addr, result);
 #endif
     return result;
 }
 
-void cosim_config_write(CpdCtrl *cpd, uint16_t bdf, uint32_t addr, uint32_t val, int size)
+void cosim_config_write(CosimPort *port, uint16_t bdf, uint32_t addr,
+                        uint32_t val, int size, bool type1)
 {
     uint8_t tlp_buffer[256];
     uint8_t response_buffer[256];
     
 #ifdef DEBUG
-	printf("%s: addr: %x\n", __func__, addr);
+    printf("%s: addr: %x\n", __func__, addr);
 #endif
     /* Get a unique tag for this transaction */
-    uint8_t tag = cpd->next_tag++;
+    uint8_t tag = port->next_tag++;
     
     /* Generate Configuration Write TLP */
     size_t tlp_size = generate_config_write_tlp(
         tlp_buffer, sizeof(tlp_buffer),
         0, tag,
         bdf,
-        addr, val, size);
+        addr, val, size, type1);
     
     if (tlp_size == 0) {
         fprintf(stderr, "Failed to generate Config Write TLP\n");
@@ -453,14 +470,14 @@ void cosim_config_write(CpdCtrl *cpd, uint16_t bdf, uint32_t addr, uint32_t val,
     }
     
     /* Send TLP over non-posted socket */
-    int rc = zmq_send(cpd->np_socket, tlp_buffer, tlp_size, 0);
+    int rc = zmq_send(port->np_socket, tlp_buffer, tlp_size, 0);
     if (rc < 0) {
         fprintf(stderr, "ZMQ send failed: %s\n", zmq_strerror(errno));
         return;
     }
     
     /* Receive Completion TLP (without data for writes) */
-    rc = zmq_recv(cpd->np_socket, response_buffer, sizeof(response_buffer), 0);
+    rc = zmq_recv(port->np_socket, response_buffer, sizeof(response_buffer), 0);
     if (rc < 0) {
         fprintf(stderr, "ZMQ recv failed: %s\n", zmq_strerror(errno));
         return;
@@ -475,23 +492,23 @@ void cosim_config_write(CpdCtrl *cpd, uint16_t bdf, uint32_t addr, uint32_t val,
     }
 }
 
-uint64_t cosim_mmio_read(CpdCtrl *cpd, uint64_t addr, unsigned size)
+uint64_t cosim_mmio_read(CosimPort *port, uint64_t addr, unsigned size)
 {
-	unsigned dw_length = (size + 3)/4;
-	u_int8_t tlp_hdr[64];
+    unsigned dw_length = (size + 3)/4;
+    u_int8_t tlp_hdr[64];
     uint8_t response_buffer[256];
     uint8_t first_be, last_be;
     /* Get a unique tag for this transaction */
-    uint8_t tag = cpd->next_tag++;
+    uint8_t tag = port->next_tag++;
 
     calculate_byte_enables(addr, size, &first_be, &last_be);
 
-	#ifdef DEBUG
-	printf("cosim_mmio_read: first_be: %x last_be: %x\n", first_be, last_be);
-	#endif
+    #ifdef DEBUG
+    printf("cosim_mmio_read: first_be: %x last_be: %x\n", first_be, last_be);
+    #endif
 
     bool is_64bit = (addr >> 32) != 0;
-	uint8_t fmt = is_64bit ? PCIE_FMT_4DW_NO_DATA : PCIE_FMT_3DW_NO_DATA;
+    uint8_t fmt = is_64bit ? PCIE_FMT_4DW_NO_DATA : PCIE_FMT_3DW_NO_DATA;
     unsigned hdr_size = is_64bit ? 16 : 12;
 
     PCIeTLPMemReq32 *hdr = (PCIeTLPMemReq32 *)tlp_hdr;
@@ -500,7 +517,7 @@ uint64_t cosim_mmio_read(CpdCtrl *cpd, uint64_t addr, unsigned size)
     hdr->length = cpu_to_be16(dw_length & 0x3ff);
     hdr->requester_id = cpu_to_be16(0x0000);
     hdr->tag = tag;
-	hdr->be = (last_be << 4) | first_be;
+    hdr->be = (last_be << 4) | first_be;
 
     if (is_64bit) {
         PCIeTLPMemReq64 *req = (PCIeTLPMemReq64 *)tlp_hdr;
@@ -510,25 +527,25 @@ uint64_t cosim_mmio_read(CpdCtrl *cpd, uint64_t addr, unsigned size)
     }
 
     /* Send over non-posted socket */
-    int rc = zmq_send(cpd->np_socket, tlp_hdr, hdr_size, 0);
+    int rc = zmq_send(port->np_socket, tlp_hdr, hdr_size, 0);
     if (rc < 0) {
         fprintf(stderr, "ZMQ send failed: %s\n", zmq_strerror(errno));
         return 0xFFFFFFFF;
     }
 
     /* Receive Completion TLP */
-    rc = zmq_recv(cpd->np_socket, response_buffer, sizeof(response_buffer), 0);
+    rc = zmq_recv(port->np_socket, response_buffer, sizeof(response_buffer), 0);
     if (rc < 0) {
         fprintf(stderr, "ZMQ recv failed: %s\n", zmq_strerror(errno));
         return 0xFFFFFFFF;
     }
 #ifdef DEBUG
-	{
-		printf("mmio read completion tlp dump\n");
-		for (int i = 0; i < rc; i++)
-			printf(" %x", response_buffer[i]);
-		printf("\n");
-	}   
+    {
+        printf("mmio read completion tlp dump\n");
+        for (int i = 0; i < rc; i++)
+            printf(" %x", response_buffer[i]);
+        printf("\n");
+    }   
 #endif
     /* Parse completion and extract data */
     uint64_t result = parse_completion_tlp(response_buffer, rc, tag, (addr & 0x3), size);
@@ -538,12 +555,12 @@ uint64_t cosim_mmio_read(CpdCtrl *cpd, uint64_t addr, unsigned size)
     return result;
 }
 
-void cosim_mmio_write(CpdCtrl *cpd, uint64_t addr, uint64_t data, unsigned size)
+void cosim_mmio_write(CosimPort *port, uint64_t addr, uint64_t data, unsigned size)
 {
-    unsigned dw_length = (size + 3) / 4; 
+    unsigned dw_length = (size + 3) / 4;
     uint8_t tlp_buf[64]; // Increased size for safety
     uint8_t first_be, last_be;
-    uint8_t tag = cpd->next_tag++;
+    uint8_t tag = port->next_tag++;
 
     calculate_byte_enables(addr, size, &first_be, &last_be);
 
@@ -572,181 +589,191 @@ void cosim_mmio_write(CpdCtrl *cpd, uint64_t addr, uint64_t data, unsigned size)
         payload[i] = (data >> (i * 8)) & 0xFF;
     }
 
-    zmq_send(cpd->push_socket, tlp_buf, hdr_size + (dw_length * 4), 0);
+    zmq_send(port->push_socket, tlp_buf, hdr_size + (dw_length * 4), 0);
 }
 
 static void cosim_build_completion(u_int8_t *hdr, 
-								   uint16_t requester_id, 
-								   uint8_t tag, 
-								   uint16_t payload_len, 
-								   uint64_t address)
+                                   uint16_t requester_id, 
+                                   uint8_t tag, 
+                                   uint16_t payload_len, 
+                                   uint64_t address)
 {
-	PCIeTLPCpl *cpl = (PCIeTLPCpl *)hdr;
-	uint16_t cs_byte_cnt;
+    PCIeTLPCpl *cpl = (PCIeTLPCpl *)hdr;
+    uint16_t cs_byte_cnt;
 
-	if (payload_len > 0) 
-		cpl->fmt_type = (PCIE_FMT_3DW_WITH_DATA << 5) | PCIE_TYPE_CPL_D;
-	else 
-		cpl->fmt_type = (PCIE_FMT_3DW_NO_DATA << 5) | PCIE_TYPE_CPL;
+    if (payload_len > 0) 
+        cpl->fmt_type = (PCIE_FMT_3DW_WITH_DATA << 5) | PCIE_TYPE_CPL_D;
+    else 
+        cpl->fmt_type = (PCIE_FMT_3DW_NO_DATA << 5) | PCIE_TYPE_CPL;
 
-	cpl->tc_attr_th = 0;
+    cpl->tc_attr_th = 0;
 
-	uint16_t length_dw = (payload_len + 3)/4;
-	cpl->length = cpu_to_be16(length_dw & 0x3ff);
-	cs_byte_cnt = (CPL_STATUS_SC << 12);
-	cs_byte_cnt |= payload_len & 0xfff;
-	cpl->cs_byte_cnt = cpu_to_be16(cs_byte_cnt);
-	cpl->tag = tag;
-	cpl->completer_id = cpu_to_be16(0x0);
-	cpl->requester_id = cpu_to_be16(requester_id);
-	cpl->lower_addr = address & 0x7f;
+    uint16_t length_dw = (payload_len + 3)/4;
+    cpl->length = cpu_to_be16(length_dw & 0x3ff);
+    cs_byte_cnt = (CPL_STATUS_SC << 12);
+    cs_byte_cnt |= payload_len & 0xfff;
+    cpl->cs_byte_cnt = cpu_to_be16(cs_byte_cnt);
+    cpl->tag = tag;
+    cpl->completer_id = cpu_to_be16(0x0);
+    cpl->requester_id = cpu_to_be16(requester_id);
+    cpl->lower_addr = address & 0x7f;
 }
 
-static void cosim_handle_mrd(CpdCtrl *cpd, uint8_t *buf)
+static void cosim_handle_mrd(CosimPort *port, uint8_t *buf)
 {
-    PCIDevice *pci_dev = PCI_DEVICE(cpd);
-	uint8_t *data_buf;
+    PCIDevice *pci_dev = port->dma_dev;
+    uint8_t *data_buf;
     MemTxResult result;
-	/* mps + 12byte cpl header */
+    /* mps + 12byte cpl header */
     uint8_t response_buf[MAX_PAYLOAD_SIZE + 12];
-	uint8_t tag;
-	uint64_t address;
-	uint16_t length, requester_id;
+    uint8_t tag;
+    uint64_t address;
+    uint16_t length, requester_id;
 
-	PCIeTLPMemReq32 *req = (PCIeTLPMemReq32 *)buf;
-	length = be16_to_cpu(req->length) & 0x3ff;
-	requester_id = be16_to_cpu(req->requester_id);
-	tag = req->tag;
+    PCIeTLPMemReq32 *req = (PCIeTLPMemReq32 *)buf;
+    length = be16_to_cpu(req->length) & 0x3ff;
+    requester_id = be16_to_cpu(req->requester_id);
+    tag = req->tag;
 
 
-	/* 3DW memrd */
-	if (buf[0] == 0x0) {
-		address = be32_to_cpu(req->address);
-	} else {
-		/* 4dw mem read */
-		PCIeTLPMemReq64 *req64 = (PCIeTLPMemReq64 *)buf;
-		address = be64_to_cpu(req64->address);
-	}
+    /* 3DW memrd */
+    if (buf[0] == 0x0) {
+        address = be32_to_cpu(req->address);
+    } else {
+        /* 4dw mem read */
+        PCIeTLPMemReq64 *req64 = (PCIeTLPMemReq64 *)buf;
+        address = be64_to_cpu(req64->address);
+    }
 
 #ifdef DEBUG
     fprintf(stderr, "cosim_handle_mrd address 0x%lx, len=%u, tag=%d\n", address, length, tag);
 #endif
 
-	if (length == 0)
-		length = 1024 * 4; /* 1024 DW */
-	else
-		length = length * 4;
+    if (length == 0)
+        length = 1024 * 4; /* 1024 DW */
+    else
+        length = length * 4;
 
 
     /* Use PCI DMA API to read from system memory */
-	/* TODO check mps
-	 */
-	data_buf = response_buf + sizeof(PCIeTLPCpl);
+    /* TODO check mps
+     */
+    data_buf = response_buf + sizeof(PCIeTLPCpl);
     result = pci_dma_read(pci_dev, address, data_buf, length);
     if (result != MEMTX_OK) {
         fprintf(stderr, "PCIe: DMA read failed at 0x%lx, len=%u, result=%d\n",
                 address, length, result);
-		/* TODO send completion for error 
-		 */
-		return;
+        fprintf(stderr, "  dma_dev=%s req_id=0x%04x cmd=0x%04x (BusMaster=%d) has_power=%d\n",
+                pci_dev->name, requester_id,
+                pci_get_word(pci_dev->config + PCI_COMMAND),
+                !!(pci_get_word(pci_dev->config + PCI_COMMAND) & PCI_COMMAND_MASTER),
+                pci_dev->has_power);
+        /* TODO send completion for error
+         */
+        return;
     }
-	/* TODO add support for split completions
-	 */
-	uint32_t cpl_len = length + 12;
-	cosim_build_completion(response_buf,
-						   requester_id,
-						   tag,
-						   length,
-						   address);
+    /* TODO add support for split completions
+     */
+    uint32_t cpl_len = length + 12;
+    cosim_build_completion(response_buf,
+                           requester_id,
+                           tag,
+                           length,
+                           address);
 
 #ifdef DEBUG
-	{
-		printf("mmio read completion dump\n");
-		for (int i = 0; i < cpl_len; i++)
-			printf(" %x", response_buf[i]);
-		printf("\n");
-	}
+    {
+        printf("mmio read completion dump\n");
+        for (int i = 0; i < cpl_len; i++)
+            printf(" %x", response_buf[i]);
+        printf("\n");
+    }
 #endif
-	zmq_send(cpd->push_socket, response_buf, cpl_len, 0);
+    zmq_send(port->push_socket, response_buf, cpl_len, 0);
 
-	return;
+    return;
 }
 
-static void cosim_handle_mwr(CpdCtrl *cpd, uint8_t *buf)
+static void cosim_handle_mwr(CosimPort *port, uint8_t *buf)
 {
-    PCIDevice *pci_dev = PCI_DEVICE(cpd);
+    PCIDevice *pci_dev = port->dma_dev;
     MemTxResult result;
-	uint8_t tag;
-	uint64_t address;
-	uint16_t length, requester_id;
-	uint8_t *data_buf;
-	
-	PCIeTLPMemReq32 *req = (PCIeTLPMemReq32 *)buf;
-	length = be16_to_cpu(req->length) & 0x3ff;
-	requester_id = be16_to_cpu(req->requester_id);
-	tag = req->tag;
+    uint8_t tag;
+    uint64_t address;
+    uint16_t length, requester_id;
+    uint8_t *data_buf;
+    
+    PCIeTLPMemReq32 *req = (PCIeTLPMemReq32 *)buf;
+    length = be16_to_cpu(req->length) & 0x3ff;
+    requester_id = be16_to_cpu(req->requester_id);
+    tag = req->tag;
 
-	(void)tag;
-	(void)requester_id;
+    (void)tag;
+    (void)requester_id;
 
-	if (buf[0] == 0x40) {
-		address = be32_to_cpu(req->address);
-		data_buf = buf + sizeof(PCIeTLPMemReq32);
-	} else {
-		/* 4dw mem read */
-		PCIeTLPMemReq64 *req64 = (PCIeTLPMemReq64 *)buf;
-		address = be64_to_cpu(req64->address);
-		data_buf = buf + sizeof(PCIeTLPMemReq64);
-	}
+    if (buf[0] == 0x40) {
+        address = be32_to_cpu(req->address);
+        data_buf = buf + sizeof(PCIeTLPMemReq32);
+    } else {
+        /* 4dw mem read */
+        PCIeTLPMemReq64 *req64 = (PCIeTLPMemReq64 *)buf;
+        address = be64_to_cpu(req64->address);
+        data_buf = buf + sizeof(PCIeTLPMemReq64);
+    }
 
-	if (length == 0)
-		length = 1024 * 4; /* 1024 DW */
-	else
-		length = length * 4;
+    if (length == 0)
+        length = 1024 * 4; /* 1024 DW */
+    else
+        length = length * 4;
 
     /* Use PCI DMA API to write to system memory */
-	/* TODO handle mps 
-	 */
+    /* TODO handle mps 
+     */
     result = pci_dma_write(pci_dev, address, data_buf, length);
     if (result != MEMTX_OK) {
-        fprintf(stderr, "PCIe: DMA read failed at 0x%lx, len=%u, result=%d\n",
+        fprintf(stderr, "PCIe: DMA write failed at 0x%lx, len=%u, result=%d\n",
                 address, length, result);
-		return;
+        fprintf(stderr, "  dma_dev=%s req_id=0x%04x cmd=0x%04x (BusMaster=%d) has_power=%d\n",
+                pci_dev->name, requester_id,
+                pci_get_word(pci_dev->config + PCI_COMMAND),
+                !!(pci_get_word(pci_dev->config + PCI_COMMAND) & PCI_COMMAND_MASTER),
+                pci_dev->has_power);
+        return;
     }
 }
 
 static void handle_posted_ops(void *opaque) 
 {
-	CpdCtrl *cpd = (CpdCtrl *)opaque;
-	uint32_t events;
+    CosimPort *port = (CosimPort *)opaque;
+    uint32_t events;
     size_t len = sizeof(events);
 
-	while (1) {
-		int rc = zmq_getsockopt(cpd->pull_socket, ZMQ_EVENTS, &events, &len);
-		if (rc < 0) {
-			fprintf(stderr, "ZMQ get sock opt failed: %s\n", zmq_strerror(errno));
-			return;
-		}
+    while (1) {
+        int rc = zmq_getsockopt(port->pull_socket, ZMQ_EVENTS, &events, &len);
+        if (rc < 0) {
+            fprintf(stderr, "ZMQ get sock opt failed: %s\n", zmq_strerror(errno));
+            return;
+        }
 
-		if (!(events & ZMQ_POLLIN)) 
-			break;
+        if (!(events & ZMQ_POLLIN)) 
+            break;
 
-		if (events & ZMQ_POLLIN) {
-			uint8_t buf[MAX_PAYLOAD_SIZE + 16];
+        if (events & ZMQ_POLLIN) {
+            uint8_t buf[MAX_PAYLOAD_SIZE + 16];
 
-			int nbytes = zmq_recv(cpd->pull_socket, buf, sizeof(buf), ZMQ_DONTWAIT);
-			if (nbytes < 0) {
-				fprintf(stderr, "ZMQ recv failed: %s\n", zmq_strerror(errno));
-				return;
-			}
-			if (buf[0] == 0x40 || buf[0] == 0x60) {
-				/* incoming memory write */
-				cosim_handle_mwr(cpd, buf);
-			} else if (buf[0] == 0x0 || buf[0] == 0x20) {
-				/* incoming memory read */
-				cosim_handle_mrd(cpd, buf);
-			}
-		}
-	}
+            int nbytes = zmq_recv(port->pull_socket, buf, sizeof(buf), ZMQ_DONTWAIT);
+            if (nbytes < 0) {
+                fprintf(stderr, "ZMQ recv failed: %s\n", zmq_strerror(errno));
+                return;
+            }
+            if (buf[0] == 0x40 || buf[0] == 0x60) {
+                /* incoming memory write */
+                cosim_handle_mwr(port, buf);
+            } else if (buf[0] == 0x0 || buf[0] == 0x20) {
+                /* incoming memory read */
+                cosim_handle_mrd(port, buf);
+            }
+        }
+    }
 
 }

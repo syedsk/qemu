@@ -20,9 +20,49 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/pci/pci_bus.h"
 #include "hw/pci/pci_device.h"
 #include "hw/pci/pcie_host.h"
 #include "qemu/module.h"
+#include "hw/pci/cosim_bridge.h"
+#include "pci-internal.h"
+
+static PCIBus *cosim_bus_for_busnr(PCIBus *root, uint8_t bus_num)
+{
+    PCIBus *bus = pci_find_bus_nr(root, bus_num);
+    if (bus && bus->cosim_config_read) {
+        return bus;
+    }
+    bus = cosim_bridge_find_bus(bus_num);
+    if (bus && bus->cosim_config_read) {
+        return bus;
+    }
+    return NULL;
+}
+
+/* Forward MMCONFIG config access to cosim when no real PCIDevice backs
+ * the target. Returns true if handled. */
+static bool pcie_mmcfg_cosim_try(PCIBus *root, hwaddr mmcfg_addr,
+                                 bool is_write, uint64_t *val, unsigned len)
+{
+    uint8_t  bus_num = PCIE_MMCFG_BUS(mmcfg_addr);
+    PCIBus *bus = cosim_bus_for_busnr(root, bus_num);
+    if (!bus) {
+        return false;
+    }
+
+    uint8_t  devfn   = PCIE_MMCFG_DEVFN(mmcfg_addr);
+    uint32_t cfgaddr = PCIE_MMCFG_CONFOFFSET(mmcfg_addr);
+
+    if (is_write) {
+        bus->cosim_config_write(bus, bus_num, devfn, cfgaddr,
+                                (uint32_t)*val, len, bus->cosim_opaque);
+    } else {
+        *val = bus->cosim_config_read(bus, bus_num, devfn, cfgaddr, len,
+                                      bus->cosim_opaque);
+    }
+    return true;
+}
 
 /* a helper function to get a PCIDevice for a given mmconfig address */
 static inline PCIDevice *pcie_dev_find_by_mmcfg_addr(PCIBus *s,
@@ -42,6 +82,10 @@ static void pcie_mmcfg_data_write(void *opaque, hwaddr mmcfg_addr,
     uint32_t limit;
 
     if (!pci_dev) {
+        uint64_t tmp = val;
+        if (pcie_mmcfg_cosim_try(s, mmcfg_addr, true, &tmp, len)) {
+            return;
+        }
         return;
     }
     addr = PCIE_MMCFG_CONFOFFSET(mmcfg_addr);
@@ -60,6 +104,10 @@ static uint64_t pcie_mmcfg_data_read(void *opaque,
     uint32_t limit;
 
     if (!pci_dev) {
+        uint64_t val = ~0x0ULL;
+        if (pcie_mmcfg_cosim_try(s, mmcfg_addr, false, &val, len)) {
+            return val;
+        }
         return ~0x0;
     }
     addr = PCIE_MMCFG_CONFOFFSET(mmcfg_addr);

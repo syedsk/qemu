@@ -27,6 +27,8 @@
 #include "hw/pci/pci_bus.h"
 #include "migration/vmstate.h"
 #include "trace.h"
+#include "hw/pci/cosim_bridge.h"
+#include "pci-internal.h"
 
 /* debug PCI */
 //#define DEBUG_PCI
@@ -37,6 +39,31 @@ do { printf("pci_host_data: " fmt , ## __VA_ARGS__); } while (0)
 #else
 #define PCI_DPRINTF(fmt, ...)
 #endif
+
+static bool pci_host_cosim_try(PCIBus *root, uint8_t bus_num, uint8_t devfn,
+                               uint32_t cfgaddr, bool is_write,
+                               uint32_t *val, unsigned len)
+{
+    /* Find the cosim-backed secondary bus for this bus number. */
+    PCIBus *bus = pci_find_bus_nr(root, bus_num);
+    if (!bus || !bus->cosim_config_read) {
+        /* fall back to the registered-bridge lookup */
+        bus = cosim_bridge_find_bus(bus_num);
+    }
+    if (!bus || !bus->cosim_config_read) {
+        return false;
+    }
+
+    if (is_write) {
+        bus->cosim_config_write(bus, bus_num, devfn, cfgaddr, *val, len,
+                                bus->cosim_opaque);
+    } else {
+        *val = bus->cosim_config_read(bus, bus_num, devfn, cfgaddr, len,
+                                      bus->cosim_opaque);
+    }
+    return true;
+}
+
 
 /*
  * PCI address
@@ -129,6 +156,14 @@ void pci_data_write(PCIBus *s, uint32_t addr, uint32_t val, unsigned len)
     uint32_t config_addr = addr & (PCI_CONFIG_SPACE_SIZE - 1);
 
     if (!pci_dev) {
+        uint8_t bus_num = (addr >> 16) & 0xff;
+        uint8_t devfn   = (addr >> 8) & 0xff;
+
+        uint32_t tmp = val;
+        if (pci_host_cosim_try(s, bus_num, devfn, config_addr,
+                               true, &tmp, len)) {
+            return;
+        }
         trace_pci_cfg_write("empty", extract32(addr, 16, 8),
                             extract32(addr, 11, 5), extract32(addr, 8, 3),
                             config_addr, val);
@@ -145,6 +180,15 @@ uint32_t pci_data_read(PCIBus *s, uint32_t addr, unsigned len)
     uint32_t config_addr = addr & (PCI_CONFIG_SPACE_SIZE - 1);
 
     if (!pci_dev) {
+        uint8_t  bus_num = (addr >> 16) & 0xff;
+        uint8_t  devfn   = (addr >> 8) & 0xff;
+
+        /* Try to forward to cosim (cocotb switch secondary bus) */
+        uint32_t val = ~0x0;
+        if (pci_host_cosim_try(s, bus_num, devfn, config_addr,
+                               false, &val, len)) {
+            return val;
+        }
         trace_pci_cfg_read("empty", extract32(addr, 16, 8),
                            extract32(addr, 11, 5), extract32(addr, 8, 3),
                            config_addr, ~0x0);

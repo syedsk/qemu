@@ -49,6 +49,17 @@ struct PCIBus {
     QLIST_HEAD(, PCIBus) child; /* this will be replaced by qdev later */
     QLIST_ENTRY(PCIBus) sibling;/* this will be replaced by qdev later */
 
+    /* === COSIM: external config-space forwarding ================= */
+    /* bus_num is the TARGET bus of the access, which may be below this
+     * bus (those buses exist only in the cosim model). */
+    uint32_t (*cosim_config_read)(PCIBus *bus, uint8_t bus_num, int devfn,
+                                  uint32_t addr, int len, void *opaque);
+    void     (*cosim_config_write)(PCIBus *bus, uint8_t bus_num, int devfn,
+                                   uint32_t addr, uint32_t val, int len,
+                                   void *opaque);
+    void    *cosim_opaque;
+    /* ============================================================= */
+
     /* The bus IRQ state is the logical OR of the connected devices.
        Keep a count of the number of devices with raised IRQs.  */
     int nirq;

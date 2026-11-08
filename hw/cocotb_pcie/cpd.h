@@ -46,21 +46,12 @@ typedef struct cocotb_pcie_ctrl_s {
     bool         bar_present[CPD_MAX_BARS];
 
     /* Cosim stuff */
-    void *zmq_context;
-    void *np_socket;
-	void *push_socket;
-	void *pull_socket;
+    CosimPort    port;
 
-    uint8_t next_tag;
     /* Port configuration */
     uint16_t np_port;
     uint16_t push_port;
     uint16_t pull_port;
 } CpdCtrl;
 
-int cpd_connect_cocotb_endpoint(CpdCtrl *cpd, Error **errp);
-uint32_t cosim_config_read(CpdCtrl *cpd, uint16_t bdf, uint32_t addr, int size);
-void cosim_config_write(CpdCtrl *cpd, uint16_t bdf, uint32_t addr, uint32_t val, int size);
-uint64_t cosim_mmio_read(CpdCtrl *cpd, uint64_t addr, unsigned size);
-void cosim_mmio_write(CpdCtrl *cpd, uint64_t addr, uint64_t data, unsigned size);
 #endif

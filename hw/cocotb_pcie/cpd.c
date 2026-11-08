@@ -23,6 +23,7 @@
 #include "hw/pci/pcie.h"
 #include "hw/qdev-properties.h"
 #include "qemu/units.h"
+#include "cosim_port.h"
 #include "cpd.h"
 #include "qemu/log.h"
 
@@ -73,7 +74,7 @@ static uint64_t cpd_mmio_read(void *opaque, hwaddr offset, unsigned size)
 
     addr = mr->addr + offset;
 
-    return cosim_mmio_read(cpd, addr, size);
+    return cosim_mmio_read(&cpd->port, addr, size);
 }
 
 static void cpd_mmio_write(void *opaque, hwaddr offset,
@@ -100,7 +101,7 @@ static void cpd_mmio_write(void *opaque, hwaddr offset,
            ctx->bar_index, (unsigned long long)addr, data, size);
 #endif
 
-    cosim_mmio_write(cpd, addr, data, size);
+    cosim_mmio_write(&cpd->port, addr, data, size);
 }
 
 static const MemoryRegionOps cpd_mmio_ops = {
@@ -198,9 +199,16 @@ static void cpd_realize(PCIDevice *pci_dev, Error **errp)
     pci_conf = pci_dev->config;
     pci_conf[PCI_COMMAND] = PCI_COMMAND_IO | PCI_COMMAND_MEMORY;
 
-	/* connect to cocotb endpoint 
-	 */
-    if (cpd_connect_cocotb_endpoint(cpd, errp) < 0) {
+    /* copy port config from device properties into the shared cosim port */
+    cpd->port.np_port   = cpd->np_port;
+    cpd->port.push_port = cpd->push_port;
+    cpd->port.pull_port = cpd->pull_port;
+    cpd->port.next_tag  = 0;
+    cpd->port.dma_dev   = pci_dev;
+
+    /* connect to cocotb endpoint
+     */
+    if (cosim_port_connect(&cpd->port, errp) < 0) {
         return;
     }
 
@@ -209,7 +217,6 @@ static void cpd_realize(PCIDevice *pci_dev, Error **errp)
         return;
     }
 
-    cpd->next_tag = 0;
     return;
 }
 
@@ -218,11 +225,11 @@ static uint32_t cpd_config_read(PCIDevice *pci_dev, uint32_t address, int len)
     CpdCtrl *cpd = CPD(pci_dev);
     uint32_t val;
 
-    val = cosim_config_read(cpd, pci_get_bdf(pci_dev), address, len);
+    val = cosim_config_read(&cpd->port, pci_get_bdf(pci_dev), address, len, false);
 
-	#ifdef DEBUG
+    #ifdef DEBUG
     printf("%s : address: %x val: %x len: %d\n", __func__, address, val, len);
-	#endif
+    #endif
     return val;
 }
 
@@ -231,11 +238,11 @@ static void cpd_config_write(PCIDevice *pci_dev, uint32_t address, uint32_t val,
     CpdCtrl *cpd = CPD(pci_dev);
 
 
-    cosim_config_write(cpd, pci_get_bdf(pci_dev), address, val, len);
+    cosim_config_write(&cpd->port, pci_get_bdf(pci_dev), address, val, len, false);
 
-	/* call pci_default_write_config so memory regions can be enabled upon bar write
-	 */
-	pci_default_write_config(pci_dev, address, val, len);
+    /* call pci_default_write_config so memory regions can be enabled upon bar write
+     */
+    pci_default_write_config(pci_dev, address, val, len);
 }
 
 static Property cpd_properties[] = {
@@ -280,7 +287,7 @@ static void cpd_class_init(ObjectClass *oc, void *data)
 
     pc->realize = cpd_realize;
 
-	/* Note: config space is forwarded to cocotb, so these QEMU-side
+    /* Note: config space is forwarded to cocotb, so these QEMU-side
      * IDs are mostly placeholders; the guest sees what the cocotb
      * device model reports. Set sane defaults anyway. */
     pc->vendor_id = 0x10ee;
